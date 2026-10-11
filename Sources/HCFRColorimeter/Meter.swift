@@ -1,0 +1,326 @@
+// HCFR Colorimeter for macOS
+// Copyright (C) 2026 Jorge Velázquez
+//
+// This program is free software; you can redistribute it and/or modify it under the terms of
+// the GNU General Public License version 2 as published by the Free Software Foundation.
+// It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
+// the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See LICENSE.
+
+import Foundation
+
+enum MeterError: LocalizedError {
+    /// The meter asks the user to do something (cover sensor, show white...). `condition` is Argyll's inst_cal_cond.
+    case needsCalibration(condition: UInt32, message: String)
+    /// The meter is not in display measurement position (e.g. i1d3 diffuser covering the sensor).
+    case incorrectPosition(String)
+    case failed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .needsCalibration(_, let msg): return msg
+        case .incorrectPosition(let msg): return msg
+        case .failed(let msg): return msg
+        }
+    }
+}
+
+/// Port found by the Argyll drivers.
+struct MeterPort: Identifiable, Hashable {
+    let index: Int
+    let name: String
+    /// Serial number (read from the meter), to tell identical models apart.
+    var serial: String? = nil
+    var id: String { name }
+    /// System serial ports (Bluetooth, debug console) are almost never meters.
+    var isLikelySerialNoise: Bool { name.hasPrefix("/dev/cu.") }
+
+    /// "X-Rite i1 DisplayPro, ColorMunki Display" from "hid36: (X-Rite i1 DisplayPro, ColorMunki Display)".
+    var model: String {
+        guard let open = name.firstIndex(of: "("), let close = name.lastIndex(of: ")"), open < close else { return name }
+        return String(name[name.index(after: open)..<close])
+    }
+
+    var displayName: String {
+        guard let serial, !serial.isEmpty else { return name }
+        return "\(model) — S/N \(serial)"
+    }
+
+    static func == (a: MeterPort, b: MeterPort) -> Bool { a.name == b.name }
+    func hash(into h: inout Hasher) { h.combine(name) }
+}
+
+/// Display type of the colorimeter (built-in calibration or HCFR CCSS spectral file), as in HCFR for Windows.
+struct MeterCorrection: Identifiable, Hashable {
+    let index: Int
+    let name: String
+    let isCCSS: Bool
+    var id: Int { index }
+}
+
+/// `hcfr-meter` helper process (HCFR's ArgyllCMS drivers) with a line protocol.
+final class MeterHelper: @unchecked Sendable {
+    private let process = Process()
+    private let input = Pipe()
+    private let output = Pipe()
+    private let errors = Pipe()
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var lines: [String] = []
+    private var waiter: CheckedContinuation<String, Error>?
+    private var dead = false
+    private var killReason: String?
+    private(set) var diagnostics: [String] = []
+
+    static var executableURL: URL? {
+        let fm = FileManager.default
+        var candidates: [URL] = []
+        if let exe = Bundle.main.executableURL {
+            candidates.append(exe.deletingLastPathComponent().appendingPathComponent("hcfr-meter"))
+            // Running with `swift run`: .build/<config>/HCFRColorimeter -> .build/meter/hcfr-meter
+            candidates.append(exe.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("meter/hcfr-meter"))
+        }
+        return candidates.first { fm.isExecutableFile(atPath: $0.path) }
+    }
+
+    /// Folder containing `ArgyllCMS/*.ccss` (HCFR's Install/color files). Argyll searches XDG_DATA_DIRS.
+    static var correctionsDataDir: String? {
+        let fm = FileManager.default
+        var candidates: [URL] = []
+        if let res = Bundle.main.resourceURL { candidates.append(res) }
+        if let exe = Bundle.main.executableURL {
+            // Development: <repo>/.build/<config>/HCFRColorimeter -> <repo>/Resources
+            candidates.append(exe.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources"))
+        }
+        return candidates.first { fm.fileExists(atPath: $0.appendingPathComponent("ArgyllCMS").path) }?.path
+    }
+
+    init() throws {
+        guard let url = Self.executableURL else {
+            throw MeterError.failed("The hcfr-meter helper was not found. Build it with build-meter.sh.")
+        }
+        process.executableURL = url
+        var env = ProcessInfo.processInfo.environment
+        if let dir = Self.correctionsDataDir {
+            env["XDG_DATA_DIRS"] = [dir, env["XDG_DATA_DIRS"]].compactMap { $0 }.joined(separator: ":")
+        }
+        process.environment = env
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = errors
+
+        output.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let data = h.availableData
+            if data.isEmpty { self?.markDead() } else { self?.append(data) }
+        }
+        errors.fileHandleForReading.readabilityHandler = { [weak self] h in
+            guard let self, let s = String(data: h.availableData, encoding: .utf8), !s.isEmpty else { return }
+            lock.lock()
+            diagnostics.append(contentsOf: s.split(separator: "\n").map(String.init))
+            if diagnostics.count > 200 { diagnostics.removeFirst(diagnostics.count - 200) }
+            lock.unlock()
+        }
+        process.terminationHandler = { [weak self] _ in self?.markDead() }
+        try process.run()
+    }
+
+    private func append(_ data: Data) {
+        lock.lock()
+        buffer.append(data)
+        while let nl = buffer.firstIndex(of: 0x0A) {
+            let lineData = buffer[buffer.startIndex..<nl]
+            buffer.removeSubrange(buffer.startIndex...nl)
+            if let line = String(data: lineData, encoding: .utf8), line.hasPrefix("@") {
+                lines.append(String(line.dropFirst()))
+            }
+        }
+        let resume = deliverLocked()
+        lock.unlock()
+        resume?()
+    }
+
+    private func markDead() {
+        lock.lock()
+        dead = true
+        let w = waiter
+        waiter = nil
+        let lastDiag = diagnostics.suffix(3).joined(separator: " ")
+        let reason = killReason
+        lock.unlock()
+        w?.resume(throwing: MeterError.failed(reason ?? "The meter process stopped (is the colorimeter unplugged?). \(lastDiag)"))
+    }
+
+    /// Must be called with the lock held; returns the resumption to run outside the lock.
+    private func deliverLocked() -> (() -> Void)? {
+        guard let w = waiter, !lines.isEmpty else { return nil }
+        waiter = nil
+        let line = lines.removeFirst()
+        return { w.resume(returning: line) }
+    }
+
+    func nextLine() async throws -> String {
+        try await withCheckedThrowingContinuation { cont in
+            lock.lock()
+            if !lines.isEmpty {
+                let line = lines.removeFirst()
+                lock.unlock()
+                cont.resume(returning: line)
+            } else if dead {
+                lock.unlock()
+                cont.resume(throwing: MeterError.failed("The meter process is not running."))
+            } else {
+                waiter = cont
+                lock.unlock()
+            }
+        }
+    }
+
+    func send(_ command: String) {
+        try? input.fileHandleForWriting.write(contentsOf: (command + "\n").data(using: .utf8)!)
+    }
+
+    func stop() {
+        if process.isRunning {
+            send("quit")
+            process.terminate()
+        }
+    }
+
+    var isRunning: Bool { process.isRunning && !dead }
+
+    /// Stops a stuck helper; the pending command fails with `reason`.
+    func kill(reason: String) {
+        lock.lock()
+        killReason = reason
+        lock.unlock()
+        if process.isRunning { process.terminate() }
+    }
+
+    deinit { stop() }
+}
+
+final class ArgyllMeter {
+    private let helper: MeterHelper
+    let name: String
+    let serial: String
+    /// Corrections the meter offers (built-in + HCFR CCSS files).
+    let corrections: [MeterCorrection]
+
+    private init(helper: MeterHelper, name: String, serial: String, corrections: [MeterCorrection]) {
+        self.helper = helper
+        self.name = name
+        self.serial = serial
+        self.corrections = corrections
+    }
+
+    /// Lists the meters. When several are connected, each one not in `skipIdentify` (e.g. the one
+    /// this app has open) is opened briefly to read its serial number.
+    static func listPorts(identifyIfSeveral: Bool = true, knownSerials: [String: String] = [:],
+                          skipIdentify: Set<String> = []) async throws -> [MeterPort] {
+        let helper = try MeterHelper()
+        defer { helper.stop() }
+        _ = try await helper.nextLine() // READY
+        helper.send("list")
+        var ports: [MeterPort] = []
+        while true {
+            let line = try await helper.nextLine()
+            if line.hasPrefix("PORT ") {
+                let parts = line.dropFirst(5).split(separator: " ", maxSplits: 1)
+                if parts.count == 2, let n = Int(parts[0]) { ports.append(MeterPort(index: n, name: String(parts[1]))) }
+            } else if line.hasPrefix("ERR ") {
+                throw MeterError.failed(String(line.dropFirst(4)))
+            } else if line == "OK" {
+                break
+            }
+        }
+        ports.removeAll { $0.isLikelySerialNoise }
+        for i in ports.indices {
+            ports[i].serial = knownSerials[ports[i].name]
+            guard identifyIfSeveral, ports.count > 1, ports[i].serial == nil,
+                  !skipIdentify.contains(ports[i].name) else { continue }
+            helper.send("ident \(ports[i].index)")
+            let reply = try await helper.nextLine()
+            if reply.hasPrefix("IDENT ") {
+                let f = reply.split(separator: " ", maxSplits: 2)
+                if f.count == 3 { ports[i].serial = String(f[2]) }
+            }
+        }
+        return ports
+    }
+
+    /// Opens the meter like HCFR for Windows: no forced mode; the Display (correction) is applied afterwards.
+    static func open(port: MeterPort) async throws -> ArgyllMeter {
+        let helper = try MeterHelper()
+        _ = try await helper.nextLine() // READY
+        helper.send("open \(port.index) default")
+        let line = try await helper.nextLine()
+        guard line.hasPrefix("OPENED ") else {
+            helper.stop()
+            throw MeterError.failed(line.hasPrefix("ERR ") ? String(line.dropFirst(4)) : line)
+        }
+        let info = line.dropFirst(7).split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+
+        helper.send("types")
+        var corrections: [MeterCorrection] = []
+        while true {
+            let l = try await helper.nextLine()
+            if l.hasPrefix("TYPE ") {
+                let f = l.dropFirst(5).split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+                if f.count >= 4, let i = Int(f[0]) { corrections.append(MeterCorrection(index: i, name: f[1], isCCSS: f[3] == "ccss")) }
+            } else { break } // OK or ERR
+        }
+        return ArgyllMeter(helper: helper, name: info.first ?? port.name, serial: info.count > 3 ? info[3] : "",
+                           corrections: corrections)
+    }
+
+    private func parseStatus(_ line: String) throws {
+        if line.hasPrefix("CAL ") {
+            let parts = line.dropFirst(4).split(separator: " ", maxSplits: 1)
+            let cond = UInt32(parts.first.map(String.init) ?? "0", radix: 16) ?? 0
+            throw MeterError.needsCalibration(condition: cond, message: parts.count > 1 ? String(parts[1]) : "Calibration required")
+        }
+        if line.hasPrefix("POS wrong") {
+            throw MeterError.incorrectPosition(String(line.dropFirst(10)))
+        }
+        if line.hasPrefix("ERR ") { throw MeterError.failed(String(line.dropFirst(4))) }
+    }
+
+    /// Throws `incorrectPosition` if the meter can't measure a display right now (diffuser on).
+    func checkPosition() async throws {
+        helper.send("pos")
+        try parseStatus(try await helper.nextLine())
+    }
+
+    func setCorrection(_ c: MeterCorrection) async throws {
+        helper.send("settype \(c.index)")
+        try parseStatus(try await helper.nextLine())
+    }
+
+    /// A reading never takes this long (even dark patches with adaptive averaging); if it does, the
+    /// driver is stuck, so the helper is stopped to unblock the app instead of waiting forever.
+    static let readTimeout: TimeInterval = 180
+
+    /// True while the helper process is alive.
+    var isAlive: Bool { helper.isRunning }
+
+    func read() async throws -> XYZ {
+        helper.send("read")
+        let watchdog = DispatchWorkItem { [helper] in helper.kill(reason: "The colorimeter stopped responding (no reading in \(Int(Self.readTimeout / 60)) minutes).") }
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.readTimeout, execute: watchdog)
+        defer { watchdog.cancel() }
+        let line = try await helper.nextLine()
+        try parseStatus(line)
+        let v = line.split(separator: " ").dropFirst().compactMap { Double($0) }
+        guard line.hasPrefix("XYZ "), v.count == 3 else { throw MeterError.failed("Unexpected reply: \(line)") }
+        return XYZ(X: v[0], Y: v[1], Z: v[2])
+    }
+
+    func calibrate() async throws {
+        helper.send("cal")
+        try parseStatus(try await helper.nextLine())
+    }
+
+    func close() { helper.stop() }
+
+    /// Stops the helper even in the middle of a reading (the pending command fails with `reason`).
+    func abort(reason: String) { helper.kill(reason: reason) }
+}

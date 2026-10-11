@@ -1,0 +1,7 @@
+# Build output
+.build/
+*.app
+*.dSYM
+# macOS
+.DS_Store
+dist/

@@ -1,0 +1,4 @@
+These CCSS display correction files are copied unchanged from HCFR
+(https://github.com/arthur-liberman/hcfr-code, folder Install/color, version 3.5.4.4).
+They are installed inside the app (Contents/Resources/ArgyllCMS) and found by the
+ArgyllCMS instrument drivers through XDG_DATA_DIRS.
