@@ -110,6 +110,8 @@ final class Session: ObservableObject {
     @Published var selectedPatch: PatchColor = .red
     /// Table shown: gray scale or primaries and secondaries.
     @Published var view: MeasureView = .grayScale
+    /// Diagram in the Information panel.
+    @Published var infoChart: InfoChart = .balance { didSet { defaults.set(infoChart.rawValue, forKey: "infoChart") } }
 
     // Pattern generator: the user's DVD / external generator (manual) or a display of this Mac
     @Published var patternSource: PatternSource = .manual { didSet { savePatternSource() } }
@@ -148,10 +150,13 @@ final class Session: ObservableObject {
         gamma = defaults.object(forKey: "gamma") as? Double ?? 2.3
         overrideBlack = defaults.object(forKey: "overrideBlack") as? Bool ?? true
         videoLevels = defaults.string(forKey: "videoLevels").flatMap(VideoLevels.init(rawValue:)) ?? .full
+        infoChart = defaults.string(forKey: "infoChart").flatMap(InfoChart.init(rawValue:)) ?? .balance
         patternArea = defaults.object(forKey: "patternArea") as? Double ?? 100
         settleSeconds = defaults.object(forKey: "settleSeconds") as? Double ?? 1.0
-        if let id = defaults.object(forKey: "patternDisplay") as? UInt32,
-           NSScreen.screens.contains(where: { $0.displayID == id }) {
+        if defaults.bool(forKey: "patternWindow") {
+            patternSource = .window
+        } else if let id = defaults.object(forKey: "patternDisplay") as? UInt32,
+                  NSScreen.screens.contains(where: { $0.displayID == id }) {
             patternSource = .display(id)
         }
         patternWindow.onEscape = { [weak self] in self?.stop() }
@@ -521,7 +526,7 @@ final class Session: ObservableObject {
     /// Manual generator: asks the user for the pattern. Built-in generator: shows it on the chosen
     /// display and waits for it to settle.
     private func present(_ pattern: TestPattern) async throws {
-        if patternScreen == nil {
+        if !generatorActive {
             Chime.request()
             try await ask("Information", "Use \(pattern.manualName) and press Continue.", style: .continueCancel)
         } else {
@@ -532,11 +537,24 @@ final class Session: ObservableObject {
     /// Shows the pattern on the generator display (if one is selected) and waits `settleSeconds`
     /// when it changed.
     private func showIfGenerator(_ pattern: TestPattern, force: Bool = false) async throws {
-        guard let screen = patternScreen else { return }
+        guard generatorActive else { return }
         if force || pattern != shownPattern || !patternWindow.isShowing {
             let black = videoLevels.code(0)
-            patternWindow.show(rgb: pattern.rgb.map { videoLevels.code($0) }, background: [black, black, black],
-                               areaPercent: patternArea, on: screen)
+            let rgb = pattern.rgb.map { videoLevels.code($0) }
+            if let screen = patternScreen {
+                patternWindow.show(rgb: rgb, background: [black, black, black], areaPercent: patternArea, on: screen)
+            } else {
+                let opening = !patternWindow.isShowing
+                patternWindow.showWindowed(rgb: rgb, background: [black, black, black], areaPercent: patternArea)
+                // A newly opened measurement window must first be placed under the meter
+                if opening {
+                    Chime.request()
+                    try await ask("Measurement window",
+                                  "Move the measurement window to the screen you are measuring (and resize it if you want), "
+                                  + "place the meter on it, then press Continue to start measuring.",
+                                  style: .continueCancel)
+                }
+            }
             shownPattern = pattern
             try await Task.sleep(for: .seconds(settleSeconds))
         }
@@ -548,6 +566,9 @@ final class Session: ObservableObject {
     }
 
     /// Display used as pattern generator, nil for the manual (DVD) generator or if it was disconnected.
+    /// True when the app shows the patterns itself (full screen on a display, or the measurement window).
+    var generatorActive: Bool { patternSource == .window || patternScreen != nil }
+
     var patternScreen: NSScreen? {
         guard case .display(let id) = patternSource else { return nil }
         return NSScreen.screens.first { $0.displayID == id }
@@ -568,7 +589,8 @@ final class Session: ObservableObject {
     private func savePatternSource() {
         if case .display(let id) = patternSource { defaults.set(id, forKey: "patternDisplay") }
         else { defaults.removeObject(forKey: "patternDisplay") }
-        if patternSource == .manual { closePattern() }
+        defaults.set(patternSource == .window, forKey: "patternWindow")
+        closePattern()
     }
 
     private func readWithCalibration(pattern: TestPattern) async throws -> XYZ {
@@ -604,7 +626,7 @@ final class Session: ObservableObject {
             // 0x100 = 100% white patch, 0x200 = 80% patch (CRT refresh rate); the built-in
             // generator shows them, with the manual generator the user is asked for them
             var text = msg
-            let auto = patternScreen != nil
+            let auto = generatorActive
             if cond & 0xFF00 == 0x100 {
                 if auto { try await showIfGenerator(.gray(100)) } else { text = "Use 100 IRE.\n\n" + msg }
             }
@@ -615,6 +637,14 @@ final class Session: ObservableObject {
             try await ask("Colorimeter calibration", text, style: .continueCancel)
             do {
                 try await meter.calibrate()
+                // As HCFR: after a calibration that needed the meter somewhere else (e.g. an i1Pro
+                // on its white tile, or a cap on the sensor), ask to put it back on the screen.
+                let needsPlacement = cond & 0xFF00 != 0x100 && cond & 0xFF00 != 0x200
+                if needsPlacement {
+                    try await ask("Calibration complete",
+                                  "The device is now calibrated. If the device requires it, return it to the measurement position on the screen and press Continue.",
+                                  style: .continueCancel)
+                }
                 return
             } catch MeterError.needsCalibration(let c, let m) {
                 cond = c; msg = m
@@ -624,7 +654,8 @@ final class Session: ObservableObject {
 
     private func ask(_ title: String, _ message: String, style: UserPrompt.Style) async throws {
         // A pattern covering the app's screen would hide the message
-        if patternWindow.isShowing, let main = NSApp.mainWindow?.screen, patternWindow.screen == main {
+        if patternSource != .window, patternWindow.isShowing, let main = NSApp.mainWindow?.screen,
+           patternWindow.screen == main {
             closePattern()
         }
         // SwiftUI drops a sheet presented while the previous one is still closing (e.g. "Use 100%

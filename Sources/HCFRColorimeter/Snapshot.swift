@@ -68,6 +68,7 @@ enum Snapshot {
         let maxLevel = args.contains("--partial") ? 50 : args.contains("--empty") ? -1 : 100
         for s in sample where s.0 <= maxLevel { session.measurements[s.0] = XYZ.fromxyY(x: s.1, y: s.2, Y: s.3) }
         session.selectedLevel = args.contains("--level10") ? 10 : max(maxLevel, 10)
+        if args.contains("--cie") { session.infoChart = args.contains("--uv") ? .cieUV : .cieXY }
         if args.contains("--project-roundtrip") {
             // Save, clear, reopen and compare (development check of .hcfrex files)
             let url = URL(fileURLWithPath: args[i + 1])

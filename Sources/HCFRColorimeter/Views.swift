@@ -61,7 +61,19 @@ struct ContentView: View {
 
             HStack(alignment: .top, spacing: 8) {
                 SelectedColorPanel(session: session).frame(width: 370)
-                Panel(title: "Information") { GrayScaleChart(session: session) }
+                Panel(title: "Information") {
+                    Picker("Chart", selection: $session.infoChart) {
+                        ForEach(InfoChart.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                    switch session.infoChart {
+                    case .balance: GrayScaleChart(session: session)
+                    case .cieXY: CIEChart(session: session, uvMode: false)
+                    case .cieUV: CIEChart(session: session, uvMode: true)
+                    }
+                }
             }
         }
         .padding(8)
@@ -206,9 +218,10 @@ private struct GeneratorMenu: View {
             Menu {
                 Picker("Generator", selection: $session.patternSource) {
                     Text("DVD / external generator (manual)").tag(PatternSource.manual)
+                    Text("Measurement window (movable)").tag(PatternSource.window)
                     ForEach(session.generatorScreens, id: \.self) { screen in
                         if let id = screen.displayID {
-                            Text(session.screenName(screen)).tag(PatternSource.display(id))
+                            Text(session.screenName(screen) + " — full screen").tag(PatternSource.display(id))
                         }
                     }
                 }
@@ -232,12 +245,13 @@ private struct GeneratorMenu: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .disabled(session.activity != .idle)
-            .help("Where the patterns come from: your DVD / external generator (the app asks for each one) or a display connected to this Mac (the app shows each pattern full screen)")
+            .help("Where the patterns come from: your DVD / external generator (the app asks for each one), a movable measurement window, or a display connected to this Mac (each pattern full screen)")
         }
         .padding(.leading, 4)
     }
 
     private var label: String {
+        if session.patternSource == .window { return "Window" }
         guard let screen = session.patternScreen else { return "DVD (manual)" }
         let n = (NSScreen.screens.firstIndex(of: screen) ?? 0) + 1
         return "Display \(n)"

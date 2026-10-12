@@ -53,6 +53,15 @@
 static icompaths *g_paths = NULL;
 static inst *g_it = NULL;
 
+/* Calibration in progress. As in Argyll's inst_handle_calibrate(), when the instrument asks
+   for a set-up (e.g. i1Pro on its white tile) the next calibrate() call must pass back the
+   type and condition it returned, meaning "the user did it". Passing inst_calc_none again made
+   the i1Pro2 ask for the white tile forever. */
+static int g_cal_pending = 0;
+static inst_cal_type g_calt = inst_calt_needed;
+static inst_cal_cond g_calc = inst_calc_none;
+
+
 static void log_to_stderr(void *cntx, a1log *p, char *fmt, va_list args) {
 	vfprintf(stderr, fmt, args);
 	fflush(stderr);
@@ -240,6 +249,7 @@ static void cmd_open(int port, const char *type) {
 	const char *dtype = "(fixed)";
 	int exact = 1;
 
+	g_cal_pending = 0;
 	if (g_it != NULL) {
 		g_it->del(g_it);
 		g_it = NULL;
@@ -294,18 +304,24 @@ static void cmd_open(int port, const char *type) {
 }
 
 /* Tries to calibrate; returns 1 if ready, 0 if it replied with @CAL/@ERR */
-static int do_calibrate(int report_ok) {
-	inst_cal_type calt = inst_calt_needed;
-	inst_cal_cond calc = inst_calc_none;
+/* Starts (resume = 0) or continues (resume = 1) a calibration; returns 1 if ready, 0 if it
+   replied with @CAL/@ERR */
+static int do_calibrate(int report_ok, int resume) {
 	inst_calc_id_type idtype = inst_calc_id_none;
 	char id[CALIDLEN] = "";
 	inst_code rv;
 
-	rv = g_it->calibrate(g_it, &calt, &calc, &idtype, id);
+	if (!resume || !g_cal_pending) {
+		g_calt = inst_calt_needed;
+		g_calc = inst_calc_none;
+	}
+	rv = g_it->calibrate(g_it, &g_calt, &g_calc, &idtype, id);
 	if ((rv & inst_mask) == inst_cal_setup) {
-		reply("CAL %x %s", (unsigned)calc, cal_message(calc, id));
+		g_cal_pending = 1;
+		reply("CAL %x %s", (unsigned)g_calc, cal_message(g_calc, id));
 		return 0;
 	}
+	g_cal_pending = 0;
 	if (rv != inst_ok && (rv & inst_mask) != inst_unsupported) {
 		reply("ERR Calibration failed: %s", inst_err(rv));
 		return 0;
@@ -317,7 +333,7 @@ static int do_calibrate(int report_ok) {
 
 static void cmd_cal(void) {
 	if (g_it == NULL) { reply("ERR No instrument open"); return; }
-	do_calibrate(1);
+	do_calibrate(1, 1);
 }
 
 static void cmd_read(void) {
@@ -329,7 +345,7 @@ static void cmd_read(void) {
 	memset(&val, 0, sizeof(val));
 	rv = g_it->read_sample(g_it, "SPOT", &val, instNoClamp);
 	if ((rv & inst_mask) == inst_needs_cal) {
-		if (!do_calibrate(0))
+		if (!do_calibrate(0, 0))
 			return;
 		rv = g_it->read_sample(g_it, "SPOT", &val, instNoClamp);
 	}

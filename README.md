@@ -7,14 +7,14 @@ CRT TVs) with a colorimeter and a calibration DVD / external pattern generator.
 > built from HCFR's open-source code: https://github.com/arthur-liberman/hcfr-code
 
 - Mac version by Jorge Velázquez, Mazatlán, México
-- Version 1.1 — universal app (Apple Silicon and Intel), macOS 14 Sonoma or later
+- Version 1.2 — universal app (Apple Silicon and Intel), macOS 14 Sonoma or later
 - License: GNU General Public License version 2 (see [LICENSE](LICENSE))
 
 ## Features
 
 - **Pattern generator**: patterns come from your DVD / external generator (the app asks for
-  each one) or from a display connected to the Mac (the app shows each IRE level or color full
-  screen, with PC 0–255 or video 16–235 levels, full field or window patch, and a settle time).
+  each one), from a movable **measurement window**, or full screen on a display connected to the
+  Mac — with PC 0–255 or video 16–235 levels, full field or window patch, and a settle time.
 - **Measurements**:
   - Grey scale (10–100 IRE, or 0–100 IRE with *Override black* off)
   - Primary colors (Red, Green, Blue + White)
@@ -23,7 +23,8 @@ CRT TVs) with a colorimeter and a calibration DVD / external pattern generator.
 - **Start / Stop**: continuous reading of the selected column; click another column to measure it
   without stopping — handy while adjusting a CRT's cut-off/bias and drive/gain.
 - HCFR-style tables (x, y, Y, Delta E, delta xy, Y target / delta L), RGB levels, target diagram,
-  current measure and the *Gray Scale Balance* chart.
+  current measure, the *Gray Scale Balance* chart and a **CIE xy / u'v' diagram** (reference gamut
+  and targets, measured colors, gray scale and measured gamut).
 - Same color math as HCFR: CIE2000 Delta E ("Absolute Y w/o gamma"), green/yellow/red thresholds,
   power law gamma (2.3 by default), all HCFR color standards (except Custom) and white points
   (D65 by default, D93, D75, D55, D50, DCI, A, B, C, E). Results were checked against HCFR for
