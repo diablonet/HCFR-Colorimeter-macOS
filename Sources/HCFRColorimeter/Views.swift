@@ -84,7 +84,9 @@ struct ContentView: View {
         } message: {
             Text("Are you sure? All measurements will be deleted and values reset to zero.")
         }
-        .sheet(item: $session.prompt) { p in PromptSheet(prompt: p, session: session) }
+        .sheet(item: $session.prompt) { p in
+            PromptSheet(prompt: p, session: session).onAppear { session.promptDidAppear(p.id) }
+        }
         .alert("Error", isPresented: Binding(get: { session.errorMessage != nil }, set: { if !$0 { session.errorMessage = nil } })) {
             Button("OK") {}
         } message: {
@@ -185,10 +187,60 @@ private struct ActionsPanel: View {
                         .disabled(session.busy || session.meter == nil)
                         .help("Choose the test: Grey scale (\(session.levels.first ?? 10) to 100 IRE), Grey scale and colors, Primary colors, or Primary and secondary colors")
                 }
+
+                GeneratorMenu(session: session)
             }
             }
         }
         .fixedSize(horizontal: true, vertical: false)
+    }
+}
+
+/// Pattern generator: manual (DVD / external generator) or a display of this Mac, with its options.
+private struct GeneratorMenu: View {
+    @ObservedObject var session: Session
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Generator").font(.caption2).foregroundStyle(.secondary)
+            Menu {
+                Picker("Generator", selection: $session.patternSource) {
+                    Text("DVD / external generator (manual)").tag(PatternSource.manual)
+                    ForEach(session.generatorScreens, id: \.self) { screen in
+                        if let id = screen.displayID {
+                            Text(session.screenName(screen)).tag(PatternSource.display(id))
+                        }
+                    }
+                }
+                .pickerStyle(.inline)
+                Divider()
+                Picker("Levels", selection: $session.videoLevels) {
+                    ForEach(VideoLevels.allCases) { Text($0.rawValue).tag($0) }
+                }
+                Picker("Patch size", selection: $session.patternArea) {
+                    Text("Full field").tag(100.0)
+                    Text("Window 50%").tag(50.0)
+                    Text("Window 25%").tag(25.0)
+                    Text("Window 10%").tag(10.0)
+                }
+                Picker("Wait before reading", selection: $session.settleSeconds) {
+                    ForEach([0.5, 1.0, 1.5, 2.0, 3.0], id: \.self) { Text(String(format: "%.1f s", $0)).tag($0) }
+                }
+            } label: {
+                Text(label).lineLimit(1)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(session.activity != .idle)
+            .help("Where the patterns come from: your DVD / external generator (the app asks for each one) or a display connected to this Mac (the app shows each pattern full screen)")
+        }
+        .padding(.leading, 4)
+    }
+
+    private var label: String {
+        guard let screen = session.patternScreen else { return "DVD (manual)" }
+        let n = (NSScreen.screens.firstIndex(of: screen) ?? 0) + 1
+        return "Display \(n)"
     }
 }
 

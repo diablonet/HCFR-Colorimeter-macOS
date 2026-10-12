@@ -7,11 +7,14 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 ./build-meter.sh
 # Universal binary: Apple Silicon (arm64) + Intel (x86_64)
-swift build -c release --arch arm64 --arch x86_64
+SWIFT_FLAGS=(-c release --arch arm64 --arch x86_64)
+swift build "${SWIFT_FLAGS[@]}"
+# Where the binary ends up depends on the Swift toolchain (.build/release, .build/apple/Products/Release, …)
+BIN_DIR="$(swift build "${SWIFT_FLAGS[@]}" --show-bin-path)"
 APP="$ROOT/HCFR Colorimeter.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp .build/release/HCFRColorimeter "$APP/Contents/MacOS/HCFRColorimeter"
+cp "$BIN_DIR/HCFRColorimeter" "$APP/Contents/MacOS/HCFRColorimeter"
 cp .build/meter/hcfr-meter "$APP/Contents/MacOS/hcfr-meter"
 # HCFR CCSS display corrections (third_party/hcfr/Install/color); the helper finds them via XDG_DATA_DIRS
 cp -R Resources/ArgyllCMS "$APP/Contents/Resources/ArgyllCMS"
@@ -28,8 +31,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Jorge Velázquez, Mazatlán, México. Mac version based on HCFR. GNU GPL v2.</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>1.1</string>
+  <key>CFBundleVersion</key><string>2</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>

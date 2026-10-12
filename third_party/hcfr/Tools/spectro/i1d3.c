@@ -19,6 +19,12 @@
  * i1d3_diff_thread() retried immediately (no sleep) after a failed diffuser-position query,
  * re-taking the instrument lock in a loop and starving read_sample(), so a measurement could
  * hang forever. It now waits 500 ms before retrying.
+ *
+ * MODIFIED 2026-10-12 by Jorge Velazquez for HCFR Colorimeter for macOS:
+ * added i1d3->ignore_diffpos (i1d3.h). When set, read_sample() does not refuse emissive
+ * readings and get_disptypesel() still lists display types when the diffuser sensor reports
+ * "ambient". The macOS app sets it for meter models it has not tested, after a report of a
+ * meter whose diffuser sensor said the diffuser was in place when it was not.
  */
 
 /* 
@@ -2015,11 +2021,15 @@ i1d3_take_XYZ_measurement(
 	} else {
 
 		/* Check that the ambient filter is not in place */
-		if ((ev = i1d3_get_diffpos(p, &pos, 0)) != inst_ok)
- 			return ev;
+		/* (HCFR Mac: skipped when ignore_diffpos is set, for meters whose diffuser
+		   sensor was reported to read wrong) */
+		if (!p->ignore_diffpos) {
+			if ((ev = i1d3_get_diffpos(p, &pos, 0)) != inst_ok)
+ 				return ev;
 	
-		if (pos != 0)
-			return i1d3_interp_code((inst *)p, I1D3_SPOS_EMIS);
+			if (pos != 0)
+				return i1d3_interp_code((inst *)p, I1D3_SPOS_EMIS);
+		}
 
 		/* Best type of reading, including refresh support */
 		if ((ev = i1d3_take_emis_measurement(p, mmode, XYZ)) != inst_ok)
@@ -3692,7 +3702,7 @@ int recreate				/* nz to re-check for new ccmx & ccss files */
 	i1d3 *p = (i1d3 *)pp;
 	inst_code rv = inst_ok;
 
-	if (!allconfig && p->dpos) {	/* If set to Ambient, there are no display types ? */
+	if (!allconfig && p->dpos && !p->ignore_diffpos) {	/* If set to Ambient, there are no display types ? */
 
 		if (pnsels != NULL)
 			*pnsels = 0;

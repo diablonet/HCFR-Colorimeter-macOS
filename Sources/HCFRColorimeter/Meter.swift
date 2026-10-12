@@ -202,13 +202,26 @@ final class ArgyllMeter {
     private let helper: MeterHelper
     let name: String
     let serial: String
+    /// The diffuser position is checked (like HCFR) only on meter models tested with this app.
+    let checksDiffuser: Bool
     /// Corrections the meter offers (built-in + HCFR CCSS files).
     let corrections: [MeterCorrection]
 
-    private init(helper: MeterHelper, name: String, serial: String, corrections: [MeterCorrection]) {
+    /// Serial-number prefixes of the meters this app was tested with (i1d3 driver family):
+    /// "C1-" Calibrite ColorChecker Display, "CM-" X-Rite ColorMunki Display.
+    /// On other models the diffuser-position check is turned off, because one user's meter
+    /// reported the diffuser in place when it was not, which blocked every reading.
+    static let testedSerialPrefixes = ["C1-", "CM-"]
+
+    static func isTested(serial: String) -> Bool {
+        testedSerialPrefixes.contains { serial.uppercased().hasPrefix($0) }
+    }
+
+    private init(helper: MeterHelper, name: String, serial: String, checksDiffuser: Bool, corrections: [MeterCorrection]) {
         self.helper = helper
         self.name = name
         self.serial = serial
+        self.checksDiffuser = checksDiffuser
         self.corrections = corrections
     }
 
@@ -258,6 +271,14 @@ final class ArgyllMeter {
             throw MeterError.failed(line.hasPrefix("ERR ") ? String(line.dropFirst(4)) : line)
         }
         let info = line.dropFirst(7).split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+        let serial = info.count > 3 ? info[3] : ""
+
+        // Before listing the Display types: with a wrong diffuser reading the driver lists none
+        let checksDiffuser = isTested(serial: serial)
+        if !checksDiffuser {
+            helper.send("diffcheck 0")
+            _ = try await helper.nextLine()
+        }
 
         helper.send("types")
         var corrections: [MeterCorrection] = []
@@ -268,8 +289,8 @@ final class ArgyllMeter {
                 if f.count >= 4, let i = Int(f[0]) { corrections.append(MeterCorrection(index: i, name: f[1], isCCSS: f[3] == "ccss")) }
             } else { break } // OK or ERR
         }
-        return ArgyllMeter(helper: helper, name: info.first ?? port.name, serial: info.count > 3 ? info[3] : "",
-                           corrections: corrections)
+        return ArgyllMeter(helper: helper, name: info.first ?? port.name, serial: serial,
+                           checksDiffuser: checksDiffuser, corrections: corrections)
     }
 
     private func parseStatus(_ line: String) throws {

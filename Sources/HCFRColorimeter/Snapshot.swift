@@ -15,6 +15,18 @@ enum Snapshot {
     @MainActor
     static func runIfRequested() {
         let args = CommandLine.arguments
+        if args.contains("--pattern-test") {
+            // Development check of the built-in pattern generator (codes and drawing)
+            for levels in VideoLevels.allCases {
+                for p in [TestPattern.gray(0), .gray(10), .gray(50), .gray(100), .color(.red), .color(.cyan)] {
+                    let codes = p.rgb.map { levels.code($0) }
+                    let full = PatternWindowController.renderTest(rgb: codes, areaPercent: 100)
+                    let win = PatternWindowController.renderTest(rgb: codes, areaPercent: 10)
+                    print("\(levels.rawValue) \(p.manualName): codes \(codes) drawn \(full.center), 10% window center \(win.center) corner \(win.corner)")
+                }
+            }
+            exit(0)
+        }
         if args.contains("--levels-test") {
             // Development check: levels to measure with and without Override black (restores the setting)
             let session = Session()

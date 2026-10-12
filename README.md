@@ -7,12 +7,15 @@ CRT TVs) with a colorimeter and a calibration DVD / external pattern generator.
 > built from HCFR's open-source code: https://github.com/arthur-liberman/hcfr-code
 
 - Mac version by Jorge Velázquez, Mazatlán, México
-- Version 1.0 — universal app (Apple Silicon and Intel), macOS 14 Sonoma or later
+- Version 1.1 — universal app (Apple Silicon and Intel), macOS 14 Sonoma or later
 - License: GNU General Public License version 2 (see [LICENSE](LICENSE))
 
 ## Features
 
-- **Measurements** (manual patterns, from a DVD or generator):
+- **Pattern generator**: patterns come from your DVD / external generator (the app asks for
+  each one) or from a display connected to the Mac (the app shows each IRE level or color full
+  screen, with PC 0–255 or video 16–235 levels, full field or window patch, and a settle time).
+- **Measurements**:
   - Grey scale (10–100 IRE, or 0–100 IRE with *Override black* off)
   - Primary colors (Red, Green, Blue + White)
   - Primary and secondary colors (+ Yellow, Cyan, Magenta)
@@ -29,12 +32,14 @@ CRT TVs) with a colorimeter and a calibration DVD / external pattern generator.
   (built-in and HCFR's CCSS files: CRT, LCD families, OLED, Projector…). Several meters can be
   connected; each is shown with its serial number. Diffuser position is checked like in HCFR.
   Tested with the i1Display family (Calibrite ColorChecker Display, ColorMunki Display); other
-  meters supported by the drivers (Spyder, i1Pro, Klein, …) have not been tested yet.
+  meters supported by the drivers (Spyder, i1Pro, Klein, …) have not been tested yet. On meter
+  models not tested yet the diffuser position is not checked, because one user's meter reported
+  the diffuser in place when it was not (tested serial prefixes: `C1-`, `CM-`).
 - Projects (`.hcfrex`), print / PDF report, sounds when a pattern is requested and when a run ends.
 
 ## Installing
 
-Download `HCFR-Colorimeter-1.0-macOS.zip` from the Releases page, unzip it and move
+Download `HCFR-Colorimeter-<version>-macOS.zip` from the Releases page, unzip it and move
 **HCFR Colorimeter.app** to Applications. The app is not signed with an Apple Developer ID, so
 the first time macOS will block it: right-click the app → **Open** → **Open** (or allow it in
 System Settings → Privacy & Security). The source code of each release is in this repository

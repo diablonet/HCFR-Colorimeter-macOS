@@ -23,6 +23,7 @@
  *   settype <i>   -> selects display type/correction <i> from "types"; "@OK" or "@ERR <msg>"
  *   ident <n>     -> "@IDENT <n> <serial number>" (opens and closes the port) or "@ERR <msg>"
  *   pos           -> "@POS ok" or "@POS wrong <instruction>" (e.g. i1d3 diffuser in place)
+ *   diffcheck <0|1> -> turns the i1d3 diffuser-position check off/on (on by default); "@OK"
  *   types         -> "@TYPE <i>\t<description>\t<disptech>\t<ccss|builtin>\trefresh=<0|1>", then "@OK"
  *   quit
  *
@@ -172,11 +173,22 @@ static const char *position_message(void) {
 	return "Meter is in incorrect position. Set it to the display measurement position, then press OK.";
 }
 
+/* Diffuser-position check of the i1d3 driver: off for meter models the app has not tested */
+static int g_diffcheck = 1;
+
+static void cmd_diffcheck(int on) {
+	g_diffcheck = on != 0;
+	if (g_it != NULL && g_it->get_itype(g_it) == instI1Disp3)
+		((i1d3 *)g_it)->ignore_diffpos = !g_diffcheck;
+	reply("OK");
+}
+
 /* Checks that the meter is in a configuration that can measure displays */
 static void cmd_pos(void) {
 	inst_mode modes = inst_mode_none;
 	int ix = -1;
 	if (g_it == NULL) { reply("ERR No instrument open"); return; }
+	if (!g_diffcheck) { reply("POS ok"); return; }
 	if (g_it->meas_config == NULL
 	 || g_it->meas_config(g_it, &modes, NULL, &ix) != inst_ok
 	 || IMODETST(modes, inst_mode_emis_spot))
@@ -362,6 +374,7 @@ int main(int argc, char *argv[]) {
 		else if (strcmp(cmd, "types") == 0) cmd_types();
 		else if (strcmp(cmd, "ident") == 0) cmd_ident(arg1);
 		else if (strcmp(cmd, "pos") == 0)   cmd_pos();
+		else if (strcmp(cmd, "diffcheck") == 0) cmd_diffcheck(arg1);
 		else if (strcmp(cmd, "settype") == 0) {
 			if (g_it != NULL && g_it->set_disptype(g_it, arg1) == inst_ok) reply("OK");
 			else reply("ERR Could not set correction %d", arg1);

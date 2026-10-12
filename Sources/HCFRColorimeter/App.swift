@@ -20,6 +20,7 @@ struct ColorimeterApp: App {
             ContentView(session: session)
                 .frame(minWidth: 1180, minHeight: 680)
                 .onAppear { AppDelegate.session = session }
+                .background(WindowCloseGuard(session: session))
         }
         .defaultSize(width: 1400, height: 860)
         .commands {
@@ -48,7 +49,7 @@ struct ColorimeterApp: App {
 }
 
 enum AboutPanel {
-    static let version = "1.0"
+    static let version = "1.1"
     /// Public repository with this program's complete source code (GPL v2 requirement).
     static let sourceURL = "https://github.com/diablonet/HCFR-Colorimeter-macOS"
 
@@ -89,14 +90,62 @@ enum AboutPanel {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "HCFR Colorimeter",
             .applicationVersion: version,
-            .version: "1",
+            .version: "2",
             .credits: credits,
         ])
     }
 }
 
+/// Asks "Save the current measurements?" when the window is closed (red button or ⌘W), before it
+/// closes. Cancel keeps the window open. Without this the window closed first and, on Cancel, the
+/// windowless app asked again in a loop.
+private struct WindowCloseGuard: NSViewRepresentable {
+    let session: Session
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { [weak view] in
+            guard let window = view?.window else { return }
+            context.coordinator.install(on: window, session: session)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    /// Window delegate that answers windowShouldClose and forwards everything else to SwiftUI's.
+    final class Coordinator: NSObject, NSWindowDelegate {
+        private weak var original: NSWindowDelegate?
+        private weak var session: Session?
+
+        @MainActor func install(on window: NSWindow, session: Session) {
+            guard !(window.delegate is Coordinator) else { return }
+            self.session = session
+            original = window.delegate
+            window.delegate = self
+        }
+
+        @MainActor func windowShouldClose(_ sender: NSWindow) -> Bool {
+            if let session, !session.confirmDiscardChanges() { return false }
+            AppDelegate.alreadyConfirmedQuit = true
+            return original?.windowShouldClose?(sender) ?? true
+        }
+
+        override func responds(to selector: Selector!) -> Bool {
+            super.responds(to: selector) || (original?.responds(to: selector) ?? false)
+        }
+
+        override func forwardingTarget(for selector: Selector!) -> Any? {
+            original?.responds(to: selector) == true ? original : super.forwardingTarget(for: selector)
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor static weak var session: Session?
+    /// The user already answered the save question when closing the window.
+    @MainActor static var alreadyConfirmedQuit = false
 
     /// Double-clicking a .hcfrex file in Finder.
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -125,7 +174,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Ask to save unsaved measurements before quitting.
     @MainActor
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let session = AppDelegate.session else { return .terminateNow }
-        return session.confirmDiscardChanges() ? .terminateNow : .terminateCancel
+        guard let session = AppDelegate.session, !AppDelegate.alreadyConfirmedQuit else { return .terminateNow }
+        if session.confirmDiscardChanges() {
+            AppDelegate.alreadyConfirmedQuit = true
+            return .terminateNow
+        }
+        return .terminateCancel
     }
 }

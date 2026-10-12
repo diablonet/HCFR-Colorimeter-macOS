@@ -110,8 +110,24 @@ final class Session: ObservableObject {
     @Published var selectedPatch: PatchColor = .red
     /// Table shown: gray scale or primaries and secondaries.
     @Published var view: MeasureView = .grayScale
+
+    // Pattern generator: the user's DVD / external generator (manual) or a display of this Mac
+    @Published var patternSource: PatternSource = .manual { didSet { savePatternSource() } }
+    @Published var videoLevels: VideoLevels = .full { didSet { defaults.set(videoLevels.rawValue, forKey: "videoLevels") } }
+    /// Patch size on the generator display, % of the screen area (100 = full field).
+    @Published var patternArea: Double = 100 { didSet { defaults.set(patternArea, forKey: "patternArea") } }
+    /// Wait after showing a pattern before reading, so the display settles.
+    @Published var settleSeconds: Double = 1.0 { didSet { defaults.set(settleSeconds, forKey: "settleSeconds") } }
+    private let patternWindow = PatternWindowController()
+    private var shownPattern: TestPattern?
     @Published var lastMeasure: Date?
     @Published var prompt: UserPrompt?
+    /// Prompt waiting for an answer (also while its sheet is being re-presented).
+    private var pendingPrompt: UserPrompt?
+    /// Prompt whose sheet is actually on screen (set by the sheet itself).
+    private var promptOnScreen: UUID?
+    /// When the last prompt was answered; a new sheet must wait for the old one to finish closing.
+    private var promptClosedAt = Date.distantPast
     @Published var errorMessage: String?
     @Published var confirmNewProject = false
     /// Project file currently open/saved (nil = never saved).
@@ -131,6 +147,14 @@ final class Session: ObservableObject {
         white = defaults.string(forKey: "white").flatMap(WhitePoint.init(rawValue:)) ?? .d65
         gamma = defaults.object(forKey: "gamma") as? Double ?? 2.3
         overrideBlack = defaults.object(forKey: "overrideBlack") as? Bool ?? true
+        videoLevels = defaults.string(forKey: "videoLevels").flatMap(VideoLevels.init(rawValue:)) ?? .full
+        patternArea = defaults.object(forKey: "patternArea") as? Double ?? 100
+        settleSeconds = defaults.object(forKey: "settleSeconds") as? Double ?? 1.0
+        if let id = defaults.object(forKey: "patternDisplay") as? UInt32,
+           NSScreen.screens.contains(where: { $0.displayID == id }) {
+            patternSource = .display(id)
+        }
+        patternWindow.onEscape = { [weak self] in self?.stop() }
     }
 
     var ref: CalReference { CalReference(standard: standard, white: white, gamma: gamma) }
@@ -278,8 +302,9 @@ final class Session: ObservableObject {
                 correction = pick
                 status = "Check the meter position…"
                 // Like HCFR for Windows: don't go on while the meter is in the wrong position
+                // (only on tested meter models; see ArgyllMeter.testedSerialPrefixes)
                 do {
-                    try await ensurePosition(m)
+                    if m.checksDiffuser { try await ensurePosition(m) }
                 } catch {
                     m.close()
                     meter = nil
@@ -289,6 +314,7 @@ final class Session: ObservableObject {
                     return
                 }
                 status = "Ready — Display: \(pick?.name ?? "default")"
+                    + (m.checksDiffuser ? "" : " · diffuser position not checked (meter model not tested yet)")
             } catch {
                 status = "Colorimeter not connected"
                 errorMessage = error.localizedDescription
@@ -361,9 +387,9 @@ final class Session: ObservableObject {
         for level in levels {
             try Task.checkCancellation()
             selectedLevel = level
-            try await askPattern("\(level) IRE")
+            try await present(.gray(level))
             status = "Measuring \(level) IRE…"
-            store(try await readWithCalibration(pattern: "\(level) IRE"), level: level)
+            store(try await readWithCalibration(pattern: .gray(level)), level: level)
         }
         selectedLevel = 100
     }
@@ -373,17 +399,12 @@ final class Session: ObservableObject {
         for patch in patches {
             try Task.checkCancellation()
             selectedPatch = patch
-            let pattern = Self.patternName(patch)
-            try await askPattern(pattern)
+            try await present(.color(patch))
             status = "Measuring \(patch.rawValue)…"
-            colorMeasurements[patch] = try await readWithCalibration(pattern: pattern)
+            colorMeasurements[patch] = try await readWithCalibration(pattern: .color(patch))
             lastMeasure = Date()
         }
         selectedPatch = .red
-    }
-
-    private static func patternName(_ patch: PatchColor) -> String {
-        patch == .white ? "100% White (100 IRE)" : "100% \(patch.rawValue)"
     }
 
     /// Start: continuous reading of the selected column (gray level or color). Clicking another
@@ -395,13 +416,15 @@ final class Session: ObservableObject {
                 if self.view == .grayScale {
                     let level = self.selectedLevel
                     self.status = "Continuous reading at \(level) IRE — click another column to measure it, Stop to finish"
-                    let xyz = try await self.readWithCalibration(pattern: "\(level) IRE")
+                    try await self.showIfGenerator(.gray(level))
+                    let xyz = try await self.readWithCalibration(pattern: .gray(level))
                     // If the column changed during the reading, it belongs to the previous pattern: drop it.
                     if self.view == .grayScale && level == self.selectedLevel { self.store(xyz, level: level) }
                 } else {
                     let patch = self.selectedPatch
                     self.status = "Continuous reading of \(patch.rawValue) — click another column to measure it, Stop to finish"
-                    let xyz = try await self.readWithCalibration(pattern: Self.patternName(patch))
+                    try await self.showIfGenerator(.color(patch))
+                    let xyz = try await self.readWithCalibration(pattern: .color(patch))
                     if self.view == .primariesSecondaries && patch == self.selectedPatch {
                         self.colorMeasurements[patch] = xyz
                         self.lastMeasure = Date()
@@ -424,6 +447,7 @@ final class Session: ObservableObject {
 
     func stop() {
         task?.cancel()
+        closePattern()
         // A reading in progress can't be interrupted; if it hasn't finished 5 s after Stop/Cancel/ESC
         // (e.g. the driver hung), restart the meter so the app never stays blocked.
         if let running = task, let m = meter {
@@ -432,15 +456,19 @@ final class Session: ObservableObject {
                 if self.task == running, self.meter === m { m.abort(reason: "Measurement cancelled") }
             }
         }
-        if let p = prompt {
+        if let p = pendingPrompt ?? prompt {
             prompt = nil
+            pendingPrompt = nil
+            promptClosedAt = Date()
             p.continuation.resume(throwing: CancellationError())
         }
     }
 
     func answerPrompt(proceed: Bool) {
-        guard let p = prompt else { return }
+        guard let p = pendingPrompt ?? prompt else { return }
         prompt = nil
+        pendingPrompt = nil
+        promptClosedAt = Date()
         if proceed { p.continuation.resume() } else { p.continuation.resume(throwing: CancellationError()) }
     }
 
@@ -460,6 +488,7 @@ final class Session: ObservableObject {
         guard task == nil else { return }
         activity = kind
         task = Task {
+            defer { closePattern() }
             do {
                 try await body()
             } catch {
@@ -489,12 +518,60 @@ final class Session: ObservableObject {
         }
     }
 
-    private func askPattern(_ pattern: String) async throws {
-        Chime.request()
-        try await ask("Information", "Use \(pattern) and press Continue.", style: .continueCancel)
+    /// Manual generator: asks the user for the pattern. Built-in generator: shows it on the chosen
+    /// display and waits for it to settle.
+    private func present(_ pattern: TestPattern) async throws {
+        if patternScreen == nil {
+            Chime.request()
+            try await ask("Information", "Use \(pattern.manualName) and press Continue.", style: .continueCancel)
+        } else {
+            try await showIfGenerator(pattern, force: true)
+        }
     }
 
-    private func readWithCalibration(pattern: String) async throws -> XYZ {
+    /// Shows the pattern on the generator display (if one is selected) and waits `settleSeconds`
+    /// when it changed.
+    private func showIfGenerator(_ pattern: TestPattern, force: Bool = false) async throws {
+        guard let screen = patternScreen else { return }
+        if force || pattern != shownPattern || !patternWindow.isShowing {
+            let black = videoLevels.code(0)
+            patternWindow.show(rgb: pattern.rgb.map { videoLevels.code($0) }, background: [black, black, black],
+                               areaPercent: patternArea, on: screen)
+            shownPattern = pattern
+            try await Task.sleep(for: .seconds(settleSeconds))
+        }
+    }
+
+    private func closePattern() {
+        patternWindow.close()
+        shownPattern = nil
+    }
+
+    /// Display used as pattern generator, nil for the manual (DVD) generator or if it was disconnected.
+    var patternScreen: NSScreen? {
+        guard case .display(let id) = patternSource else { return nil }
+        return NSScreen.screens.first { $0.displayID == id }
+    }
+
+    /// Displays that can be used as generator: all screens, the one with the app window last.
+    var generatorScreens: [NSScreen] {
+        let appScreen = NSApp.mainWindow?.screen ?? NSApp.windows.first(where: { $0.isVisible })?.screen
+        return NSScreen.screens.sorted { a, _ in a != appScreen }
+    }
+
+    func screenName(_ screen: NSScreen) -> String {
+        let n = (NSScreen.screens.firstIndex(of: screen) ?? 0) + 1
+        let appScreen = NSApp.mainWindow?.screen
+        return "Display \(n): \(screen.localizedName)" + (screen == appScreen ? " (this window)" : "")
+    }
+
+    private func savePatternSource() {
+        if case .display(let id) = patternSource { defaults.set(id, forKey: "patternDisplay") }
+        else { defaults.removeObject(forKey: "patternDisplay") }
+        if patternSource == .manual { closePattern() }
+    }
+
+    private func readWithCalibration(pattern: TestPattern) async throws -> XYZ {
         guard let meter else { throw MeterError.failed("Colorimeter not connected") }
         while true {
             try Task.checkCancellation()
@@ -502,7 +579,7 @@ final class Session: ObservableObject {
                 return try await meter.read()
             } catch MeterError.needsCalibration(let cond, let msg) {
                 try await calibrate(meter: meter, condition: cond, message: msg)
-                try await askPattern(pattern)
+                try await present(pattern)
             } catch MeterError.incorrectPosition(let msg) {
                 try await ask("Incorrect Position", msg, style: .position)
             }
@@ -524,10 +601,17 @@ final class Session: ObservableObject {
     private func calibrate(meter: ArgyllMeter, condition: UInt32, message: String) async throws {
         var cond = condition, msg = message
         while true {
-            // 0x100 = 100% white patch, 0x200 = 80% patch (CRT refresh rate)
+            // 0x100 = 100% white patch, 0x200 = 80% patch (CRT refresh rate); the built-in
+            // generator shows them, with the manual generator the user is asked for them
             var text = msg
-            if cond & 0xFF00 == 0x100 { text = "Use 100 IRE.\n\n" + msg }
-            if cond & 0xFF00 == 0x200 { text = "Use 80 IRE (the colorimeter measures the CRT refresh rate).\n\n" + msg }
+            let auto = patternScreen != nil
+            if cond & 0xFF00 == 0x100 {
+                if auto { try await showIfGenerator(.gray(100)) } else { text = "Use 100 IRE.\n\n" + msg }
+            }
+            if cond & 0xFF00 == 0x200 {
+                if auto { try await showIfGenerator(.gray(80)) }
+                else { text = "Use 80 IRE (the colorimeter measures the CRT refresh rate).\n\n" + msg }
+            }
             try await ask("Colorimeter calibration", text, style: .continueCancel)
             do {
                 try await meter.calibrate()
@@ -539,10 +623,35 @@ final class Session: ObservableObject {
     }
 
     private func ask(_ title: String, _ message: String, style: UserPrompt.Style) async throws {
+        // A pattern covering the app's screen would hide the message
+        if patternWindow.isShowing, let main = NSApp.mainWindow?.screen, patternWindow.screen == main {
+            closePattern()
+        }
+        // SwiftUI drops a sheet presented while the previous one is still closing (e.g. "Use 100%
+        // Red" right after answering "Run … measures?"), which left the app waiting for an
+        // invisible message. Wait for the closing animation first…
+        let sinceClosed = Date().timeIntervalSince(promptClosedAt)
+        if sinceClosed < 0.6 { try await Task.sleep(for: .seconds(0.6 - sinceClosed)) }
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-            prompt = UserPrompt(title: title, message: message, style: style, continuation: c)
+            let p = UserPrompt(title: title, message: message, style: style, continuation: c)
+            pendingPrompt = p
+            prompt = p
+            // …and if it still did not appear, present it again.
+            Task { @MainActor in
+                for _ in 0..<5 {
+                    try? await Task.sleep(for: .seconds(1))
+                    guard self.pendingPrompt?.id == p.id, self.promptOnScreen != p.id else { return }
+                    self.prompt = nil
+                    try? await Task.sleep(for: .seconds(0.6))
+                    guard self.pendingPrompt?.id == p.id, self.promptOnScreen != p.id else { return }
+                    self.prompt = p
+                }
+            }
         }
     }
+
+    /// Called by the prompt sheet when it is on screen.
+    func promptDidAppear(_ id: UUID) { promptOnScreen = id }
 }
 
 /// Soft sounds: one when the app asks for a pattern, one when a measurement run finishes.

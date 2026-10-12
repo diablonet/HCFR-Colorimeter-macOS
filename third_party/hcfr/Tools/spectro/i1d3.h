@@ -15,6 +15,9 @@
  *
  * This material is licenced under the GNU GENERAL PUBLIC LICENSE Version 2 or later :-
  * see the License2.txt file for licencing details.
+ *
+ * MODIFIED 2026-10-12 by Jorge Velazquez for HCFR Colorimeter for macOS:
+ * added ignore_diffpos to struct _i1d3 (see i1d3.c).
  */
 
 /* 
@@ -124,6 +127,7 @@ struct _i1d3 {
 	char serial_no[21];			/* "I1-11.A-01.100999.02" or "CM-11.A-01.100999.02" */
 	char vers_no[11];			/* "A-01", "A-02" */
 	char prod_name[32];			/* "i1Display3 " or "ColorMunki Display" */
+	int ignore_diffpos;			/* HCFR Mac: nz = don't check the diffuser position */
 	int prod_type;				/* 16 bit product type number. i1d3_disppro = 0x0001, */
 								/* i1d3_munkdisp = 0x0002 */
 	char firm_ver[32];			/* Firmware version string. ie. "v1.0 " */
