@@ -7,7 +7,7 @@ CRT TVs) with a colorimeter and a calibration DVD / external pattern generator.
 > built from HCFR's open-source code: https://github.com/arthur-liberman/hcfr-code
 
 - Mac version by Jorge Velázquez, Mazatlán, México
-- Version 1.2 — universal app (Apple Silicon and Intel), macOS 14 Sonoma or later
+- Version 1.3 — universal app (Apple Silicon and Intel), macOS 14 Sonoma or later
 - License: GNU General Public License version 2 (see [LICENSE](LICENSE))
 
 ## Features
@@ -36,6 +36,8 @@ CRT TVs) with a colorimeter and a calibration DVD / external pattern generator.
   meters supported by the drivers (Spyder, i1Pro, Klein, …) have not been tested yet. On meter
   models not tested yet the diffuser position is not checked, because one user's meter reported
   the diffuser in place when it was not (tested serial prefixes: `C1-`, `CM-`).
+  Spectrometers with a high resolution mode (i1Pro, i1Pro2, i1Pro3, ColorMunki) can use 3.3 nm
+  instead of the standard 10 nm ("High res" in the Sensor panel).
 - Projects (`.hcfrex`), print / PDF report, sounds when a pattern is requested and when a run ends.
 
 ## Installing

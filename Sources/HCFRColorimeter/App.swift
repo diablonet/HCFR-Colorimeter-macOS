@@ -49,7 +49,7 @@ struct ColorimeterApp: App {
 }
 
 enum AboutPanel {
-    static let version = "1.2"
+    static let version = "1.3"
     /// Public repository with this program's complete source code (GPL v2 requirement).
     static let sourceURL = "https://github.com/diablonet/HCFR-Colorimeter-macOS"
 
@@ -90,7 +90,7 @@ enum AboutPanel {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "HCFR Colorimeter",
             .applicationVersion: version,
-            .version: "3",
+            .version: "4",
             .credits: credits,
         ])
     }

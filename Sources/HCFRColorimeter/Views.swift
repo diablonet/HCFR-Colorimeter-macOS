@@ -96,9 +96,6 @@ struct ContentView: View {
         } message: {
             Text("Are you sure? All measurements will be deleted and values reset to zero.")
         }
-        .sheet(item: $session.prompt) { p in
-            PromptSheet(prompt: p, session: session).onAppear { session.promptDidAppear(p.id) }
-        }
         .alert("Error", isPresented: Binding(get: { session.errorMessage != nil }, set: { if !$0 { session.errorMessage = nil } })) {
             Button("OK") {}
         } message: {
@@ -114,7 +111,7 @@ struct ContentView: View {
     }
 }
 
-private struct PromptSheet: View {
+struct PromptSheet: View {
     let prompt: UserPrompt
     @ObservedObject var session: Session
 
@@ -374,7 +371,7 @@ private struct SensorPanel: View {
             HStack(spacing: 6) {
                 Circle().fill(session.meter != nil ? .green : .red).frame(width: 9, height: 9)
                 if session.ports.count > 1 {
-                    Picker("", selection: Binding(get: { session.selectedPort }, set: { session.selectedPort = $0 })) {
+                    Picker("", selection: Binding(get: { session.selectedPort }, set: { session.choosePort($0) })) {
                         ForEach(session.ports) { Text($0.displayName).tag(MeterPort?.some($0)) }
                     }
                     .labelsHidden()
@@ -393,6 +390,12 @@ private struct SensorPanel: View {
                 Button("Connect") { session.connect() }
                     .disabled(session.busy || session.selectedPort == nil)
                     .help("Connect to the colorimeter selected above")
+                if session.meter?.supportsHighRes == true {
+                    Toggle("High res (3.3 nm)", isOn: Binding(get: { session.highRes }, set: { session.setHighRes($0) }))
+                        .font(.caption)
+                        .disabled(session.activity != .idle)
+                        .help("Spectral resolution of the spectrometer: 3.3 nm (high) or 10 nm (standard, default), as HCFR's HiRes option")
+                }
                 Spacer(minLength: 0)
             }
             // 3) Display

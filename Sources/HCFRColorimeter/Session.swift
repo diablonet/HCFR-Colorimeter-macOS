@@ -110,6 +110,8 @@ final class Session: ObservableObject {
     @Published var selectedPatch: PatchColor = .red
     /// Table shown: gray scale or primaries and secondaries.
     @Published var view: MeasureView = .grayScale
+    /// Spectrometers with high resolution mode: 3.3 nm instead of the standard 10 nm (as HCFR's HiRes).
+    @Published var highRes: Bool = false { didSet { defaults.set(highRes, forKey: "highRes") } }
     /// Diagram in the Information panel.
     @Published var infoChart: InfoChart = .balance { didSet { defaults.set(infoChart.rawValue, forKey: "infoChart") } }
 
@@ -121,6 +123,7 @@ final class Session: ObservableObject {
     /// Wait after showing a pattern before reading, so the display settles.
     @Published var settleSeconds: Double = 1.0 { didSet { defaults.set(settleSeconds, forKey: "settleSeconds") } }
     private let patternWindow = PatternWindowController()
+    private var promptPanel: PromptPanelController?
     private var shownPattern: TestPattern?
     @Published var lastMeasure: Date?
     @Published var prompt: UserPrompt?
@@ -150,6 +153,7 @@ final class Session: ObservableObject {
         gamma = defaults.object(forKey: "gamma") as? Double ?? 2.3
         overrideBlack = defaults.object(forKey: "overrideBlack") as? Bool ?? true
         videoLevels = defaults.string(forKey: "videoLevels").flatMap(VideoLevels.init(rawValue:)) ?? .full
+        highRes = defaults.bool(forKey: "highRes")
         infoChart = defaults.string(forKey: "infoChart").flatMap(InfoChart.init(rawValue:)) ?? .balance
         patternArea = defaults.object(forKey: "patternArea") as? Double ?? 100
         settleSeconds = defaults.object(forKey: "settleSeconds") as? Double ?? 1.0
@@ -160,6 +164,7 @@ final class Session: ObservableObject {
             patternSource = .display(id)
         }
         patternWindow.onEscape = { [weak self] in self?.stop() }
+        promptPanel = PromptPanelController(session: self)
     }
 
     var ref: CalReference { CalReference(standard: standard, white: white, gamma: gamma) }
@@ -275,6 +280,29 @@ final class Session: ObservableObject {
         }
     }
 
+    /// High resolution checkbox: applied to the connected spectrometer right away.
+    func setHighRes(_ on: Bool) {
+        guard let meter, meter.supportsHighRes, activity == .idle else { return }
+        Task {
+            do {
+                try await meter.setHighRes(on)
+                highRes = on
+                status = on ? "High resolution (3.3 nm) on — the meter may ask for a new calibration"
+                            : "Standard resolution (10 nm)"
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// The user picked a colorimeter in the list: use it right away (choosing it without pressing
+    /// Connect used to keep measuring with the previous meter).
+    func choosePort(_ port: MeterPort?) {
+        guard let port, port != selectedPort || meter == nil else { return }
+        selectedPort = port
+        if activity == .idle && !connecting { connect() }
+    }
+
     func connect() {
         guard let port = selectedPort else {
             errorMessage = "Choose a colorimeter first."
@@ -303,6 +331,7 @@ final class Session: ObservableObject {
                     ?? m.corrections.first { $0.isCCSS && $0.name.hasPrefix("CRT") }
                     ?? m.corrections.first
                 if let pick { try await m.setCorrection(pick) }
+                if m.supportsHighRes && highRes { try? await m.setHighRes(true) }
                 meter = m
                 correction = pick
                 status = "Check the meter position…"

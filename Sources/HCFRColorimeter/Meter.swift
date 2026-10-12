@@ -204,6 +204,8 @@ final class ArgyllMeter {
     let serial: String
     /// The diffuser position is checked (like HCFR) only on meter models tested with this app.
     let checksDiffuser: Bool
+    /// Spectrometer with a high resolution mode (3.3 nm instead of 10 nm): i1Pro, i1Pro2, i1Pro3, ColorMunki.
+    let supportsHighRes: Bool
     /// Corrections the meter offers (built-in + HCFR CCSS files).
     let corrections: [MeterCorrection]
 
@@ -217,11 +219,13 @@ final class ArgyllMeter {
         testedSerialPrefixes.contains { serial.uppercased().hasPrefix($0) }
     }
 
-    private init(helper: MeterHelper, name: String, serial: String, checksDiffuser: Bool, corrections: [MeterCorrection]) {
+    private init(helper: MeterHelper, name: String, serial: String, checksDiffuser: Bool, supportsHighRes: Bool,
+                 corrections: [MeterCorrection]) {
         self.helper = helper
         self.name = name
         self.serial = serial
         self.checksDiffuser = checksDiffuser
+        self.supportsHighRes = supportsHighRes
         self.corrections = corrections
     }
 
@@ -290,7 +294,8 @@ final class ArgyllMeter {
             } else { break } // OK or ERR
         }
         return ArgyllMeter(helper: helper, name: info.first ?? port.name, serial: serial,
-                           checksDiffuser: checksDiffuser, corrections: corrections)
+                           checksDiffuser: checksDiffuser, supportsHighRes: info.count > 4 && info[4] == "1",
+                           corrections: corrections)
     }
 
     private func parseStatus(_ line: String) throws {
@@ -308,6 +313,12 @@ final class ArgyllMeter {
     /// Throws `incorrectPosition` if the meter can't measure a display right now (diffuser on).
     func checkPosition() async throws {
         helper.send("pos")
+        try parseStatus(try await helper.nextLine())
+    }
+
+    /// 3.3 nm (true) or standard 10 nm (false) spectral resolution.
+    func setHighRes(_ on: Bool) async throws {
+        helper.send("highres \(on ? 1 : 0)")
         try parseStatus(try await helper.nextLine())
     }
 
